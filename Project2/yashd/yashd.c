@@ -182,3 +182,16 @@ int main(int argc, char* argv[])
 
     printf("PAST BIND!\n");
 }
+
+
+
+
+//yash code here
+
+//1. grabbing the cmd
+//2. if there is a stdoout sending to socket
+//2.1 redirection
+//2.2 piping 
+//3. if there std in 
+
+// where are we sending files in 

@@ -19,7 +19,9 @@ int rc;
 
 void sigtstp_handler(int sig);
 void sigint_handler(int sig);
-
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//prototype for the communication thread//////
+///////////////////////////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char* argv[])
 {
@@ -81,6 +83,10 @@ int main(int argc, char* argv[])
     {
         clear_string(data, MAX_DATA);
 
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/        
+
         // Get prompt from server (+ response) from server
         rc = recv(server_socket_fd, data, MAX_DATA, 0);
         if (rc < 0)
@@ -96,8 +102,24 @@ int main(int argc, char* argv[])
         }
         printf("%s", data);
 
+/////////////////////////////////////////////////////////////
+/*pthread create
 
-        //CREATE A FUNCTION THAT CREATES
+so we will have a thread id
+some other stuff in the struct
+will there even be a critical section
+maybe just to print
+*/
+///////////////////////////////////////
+
+
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
+
+
+        signal(SIGINT, sigint_handler);   // Handle Ctrl+C
+        signal(SIGTSTP, sigtstp_handler); // Handle Ctrl+Z
         // Check if signal was received and send that to the server
         if (strlen(signal_message) > 0) {
             // Send signal message to the server
@@ -110,8 +132,10 @@ int main(int argc, char* argv[])
             memset(signal_message, 0, sizeof(signal_message));
         }
 
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
         // Collect terminal input
-        printf("Hey I am here");
         if (fgets(terminal_input_string, sizeof(terminal_input_string), stdin) == NULL)
         {
             printf("\n");   // Unsure if we want this or not, this is just to reset the line when closing
@@ -130,21 +154,27 @@ int main(int argc, char* argv[])
             perror("SEND ERROR");
             exit(-1);
         }
+
+
     }
+    free(data);
 }
 
 
-
-
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
 
 // Signal handler for Ctrl+C
 void sigint_handler(int sig) {
         snprintf(signal_message, MAX_DATA, "CTL c\n");
-        printf("SIGNAL IS POPPED");
 }
 
 // Signal handler for Ctrl+Z
 void sigtstp_handler(int sig) {
         snprintf(signal_message, MAX_DATA, "CTL z\n");
-        printf("SIGNAL IS POPPED");
 }
+
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
+/*------------------------------------------------------------------------------------------------*/
