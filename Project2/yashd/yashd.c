@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -9,22 +10,26 @@
 #include <stdlib.h>
 #include <time.h>
 #include <pthread.h>
+#include <fcntl.h>
 
 #include "yash_common.h"
+#include "yash_commands.h"
 
 static int MAX_CLIENTS = 10;    // TODO: not sure what this should be?
 static int MAX_NAME_LENGTH = 100;
 static char LOG_FILE[] = "/tmp/yashd.log";
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void writeToLog(char* data, char* ip_addr, uint16_t port)
+void writeToLog(char* data, char* ip_addr, uint16_t port, FILE *log)
 {
     char log_entry[MAX_DATA];
     char date_entry[MAX_DATA];
     time_t cur_time = time(NULL);
     strftime(date_entry, sizeof(date_entry), "%b %d %X", localtime(&cur_time));
-    snprintf(log_entry, MAX_DATA * sizeof(char), "%s yashd[%s:%d]: %s", date_entry, ip_addr, port, data);
-
-    printf("DEBUG ENTRY: %s\n", log_entry);
+    pthread_mutex_lock(&log_lock);  // TODO: Might need to beef up this for race conditions?
+    fprintf(log, "%s yashd[%s:%d]: %s\n", date_entry, ip_addr, port, data);
+    fflush(log);
+    pthread_mutex_unlock(&log_lock);
 }
 
 void reusePort(int s)
@@ -37,7 +42,59 @@ void reusePort(int s)
 	}
 }
 
+void initialize_daemon()
+{
+    // 1) Make child of init
+    int pid = fork();
+    if (pid > 0){
+        exit(0);
+    }
+
+    // 2) Close all file descriptors & redirect to NULL
+    int fdtable_size = getdtablesize();
+    for (int i = 0; i < fdtable_size; i++)
+    {
+        close(i);
+    }
+
+    int null_fd = open("/dev/null", O_RDWR);
+    if (null_fd < 0)
+    {
+        exit(1);
+    }
+    dup2(null_fd, STDIN_FILENO);
+    dup2(null_fd, STDOUT_FILENO);
+    close(null_fd);
+
+    // 3) Put daemon in its own session (own process group?)
+    setsid();
+
+    // 4) Move to "safe" working directory
+    chdir("/tmp");
+
+    // 5) Ensure only one copy of the daemon is running
+    int lock_check_fd = open("/tmp/yashd.pid", O_RDWR | O_CREAT, 0666);
+    if (lock_check_fd < 0)
+    {
+        exit(1);
+    }
+
+    if (lockf(lock_check_fd, F_TLOCK, 0) != 0)
+    {
+        exit(0);
+    }
+    char pid_str[100];
+    sprintf(pid_str, "%d", getpid());
+    write(lock_check_fd, pid_str, strlen(pid_str));
+
+    // 6) Set umask
+    umask(0);
+
+    // TODO: Any more steps we need? Which order, from example or from class?
+}
+
 typedef struct client_thread_args {
+    FILE *log_file;
     int client_socket_fd;
     struct sockaddr_in client_sockaddr;
 } client_thread_args;
@@ -50,6 +107,7 @@ void *clientThread(void *args)
     //char data[MAX_DATA];
     char *data = malloc(sizeof(char) * MAX_DATA);
     ssize_t rc;
+    int num_of_tokens;
 
     clear_string(data, MAX_DATA);
     while(1)
@@ -65,7 +123,6 @@ void *clientThread(void *args)
 
         // Get command, signal, plain text from server
         rc = recv(arg_data->client_socket_fd, data, MAX_DATA, 0);
-        writeToLog(data, inet_ntoa(arg_data->client_sockaddr.sin_addr), ntohs(arg_data->client_sockaddr.sin_port));
         if (rc < 0)
         {
             perror("RECV ERROR");
@@ -81,6 +138,37 @@ void *clientThread(void *args)
 
         // NULL-terminate client data
         data[rc] = '\0';
+
+        // Remove newline from the input string
+        size_t replace_newline_char = strcspn(data, "\n");
+        if (replace_newline_char != strlen(data))
+        {
+            data[replace_newline_char] = 0;
+        }
+        else
+        {
+            // Means this was an invalid command? TODO: figure out exception for raw input
+            printf("Invalid Command String!\n");
+        }
+        writeToLog(data, inet_ntoa(arg_data->client_sockaddr.sin_addr), ntohs(arg_data->client_sockaddr.sin_port), arg_data->log_file);
+
+        struct PCB *pcb_pointer = NULL;
+        char **tokens = tokenize_input(data, &num_of_tokens);
+        char *command_string = malloc(sizeof(char) * MAX_DATA);
+        command_string[0] = 0;
+
+        if ((num_of_tokens > 1) && (strcmp(tokens[0], "CMD") == 0))
+        {
+            for (int i = 1; i < num_of_tokens; i++)
+            {
+                strcat(command_string, tokens[i]);
+                strcat(command_string, " ");
+            }
+        }
+
+        printf("DEBUG - CMD STRING: %s \n", command_string);
+
+        yash_command(command_string, pcb_pointer);
     }
 }
 
@@ -92,8 +180,11 @@ int main(int argc, char* argv[])
     struct sockaddr_in client;
 
     int server_socket_fd, client_socket_fd, rc, next_thread;
+    FILE *log_file;
     pthread_t threads[MAX_CLIENTS];
     client_thread_args thread_args[MAX_CLIENTS];
+
+    //initialize_daemon();  // Just for ease of debug
 
     addrinfo_hints.ai_family = AF_INET;
     addrinfo_hints.ai_socktype = SOCK_STREAM;
@@ -137,7 +228,6 @@ int main(int argc, char* argv[])
     server.sin_family = AF_INET;
     server.sin_port = htons(atoi(YASHD_PORT));
     server.sin_addr.s_addr = inet_addr(hostname); // This is just for testing on localhost
-    //server.sin_addr.s_addr = htonl(INADDR_ANY); // REMOVE LATER, NEED TO ACCEPT ALL IP ADDRESSES
     if (bind(server_socket_fd, (struct sockaddr *) &server, sizeof(server)))
     {
         perror("BINDING ERROR");
@@ -152,6 +242,7 @@ int main(int argc, char* argv[])
         exit(-1);
     }
 
+    log_file = fopen(LOG_FILE, "w");
     next_thread = 0;
     while (1)
     {
@@ -169,6 +260,7 @@ int main(int argc, char* argv[])
         //clientThread(client_socket_fd, client);
         thread_args[next_thread].client_socket_fd = client_socket_fd;
         thread_args[next_thread].client_sockaddr = client;
+        thread_args[next_thread].log_file = log_file;
         rc = pthread_create(&threads[next_thread], NULL, clientThread, &thread_args[next_thread]);
         if (rc)
         {
@@ -182,16 +274,3 @@ int main(int argc, char* argv[])
 
     printf("PAST BIND!\n");
 }
-
-
-
-
-//yash code here
-
-//1. grabbing the cmd
-//2. if there is a stdoout sending to socket
-//2.1 redirection
-//2.2 piping 
-//3. if there std in 
-
-// where are we sending files in 

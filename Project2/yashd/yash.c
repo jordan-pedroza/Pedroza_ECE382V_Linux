@@ -13,25 +13,25 @@
 
 #include "yash_common.h"
 
+void sigtstp_handler(int sig);
+void sigint_handler(int sig);
 char signal_message[1024];
 int server_socket_fd;
 int rc;
 
-void sigtstp_handler(int sig);
-void sigint_handler(int sig);
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//prototype for the communication thread//////
-///////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////
+//prototype for the communication thread//
+//////////////////////////////////////////
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
     struct addrinfo addrinfo_hints;
     struct addrinfo *addrinfo_result;
     struct sockaddr_in server;
     struct sockaddr_in client;
 
-    //int server_socket_fd;
-    //int rc;
+    // int server_socket_fd;
+    // int rc;
 
     char terminal_input_string[MAX_DATA];
     char *data = malloc(sizeof(char) * MAX_DATA);
@@ -39,7 +39,7 @@ int main(int argc, char* argv[])
     addrinfo_hints.ai_family = AF_INET;
     addrinfo_hints.ai_socktype = SOCK_STREAM;
     addrinfo_hints.ai_protocol = 0;
-    addrinfo_hints.ai_flags = 0;    // MEGA errors when not 0'ing out everything unused here
+    addrinfo_hints.ai_flags = 0; // MEGA errors when not 0'ing out everything unused here
     addrinfo_hints.ai_canonname = NULL;
     addrinfo_hints.ai_addr = NULL;
     addrinfo_hints.ai_next = NULL;
@@ -58,7 +58,7 @@ int main(int argc, char* argv[])
     if (rc)
     {
         printf("ERROR IN GETADDRINFO: %s\n", gai_strerror(rc));
-        exit(-1);   // Problem with getting server address
+        exit(-1); // Problem with getting server address
     }
 
     // --- Client Socket IP/Port Step ---
@@ -66,12 +66,12 @@ int main(int argc, char* argv[])
 
     // --- Client Connect Step ---
     struct sockaddr_in *sockaddr_result;
-    sockaddr_result = (struct sockaddr_in *) addrinfo_result->ai_addr;
+    sockaddr_result = (struct sockaddr_in *)addrinfo_result->ai_addr;
     server.sin_family = AF_INET;
     server.sin_port = htons(atoi(YASHD_PORT));
     server.sin_addr.s_addr = sockaddr_result->sin_addr.s_addr;
 
-    if (connect(server_socket_fd, (struct sockaddr *) &server, sizeof(server)))
+    if (connect(server_socket_fd, (struct sockaddr *)&server, sizeof(server)))
     {
         close(server_socket_fd);
         perror("CONNECT ERROR");
@@ -82,10 +82,11 @@ int main(int argc, char* argv[])
     while (1)
     {
         clear_string(data, MAX_DATA);
+        memset(signal_message, 0, sizeof(signal_message));
 
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/        
+        /*--------------------------------------------------------------------------------*/
+        /*--------------------------------------------------------------------------------*/
+        /*--------------------------------------------------------------------------------*/
 
         // Get prompt from server (+ response) from server
         rc = recv(server_socket_fd, data, MAX_DATA, 0);
@@ -102,48 +103,34 @@ int main(int argc, char* argv[])
         }
         printf("%s", data);
 
-/////////////////////////////////////////////////////////////
-/*pthread create
+        ///////////////////////////////////////
+        /*pthread create
 
-so we will have a thread id
-some other stuff in the struct
-will there even be a critical section
-maybe just to print
-*/
-///////////////////////////////////////
+        so we will have a thread id
+        some other stuff in the struct
+        will there even be a critical section
+        maybe just to print
+        */
+        ///////////////////////////////////////
 
-
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
-
-
+        /*--------------------------------------------------------------------------------*/
+        /*--------------------------------------------------------------------------------*/
+        /*--------------------------------------------------------------------------------*/
         signal(SIGINT, sigint_handler);   // Handle Ctrl+C
         signal(SIGTSTP, sigtstp_handler); // Handle Ctrl+Z
-        // Check if signal was received and send that to the server
-        if (strlen(signal_message) > 0) {
-            // Send signal message to the server
-            rc = send(server_socket_fd, signal_message, strlen(signal_message), 0);
-            if (rc < 0) {
-                perror("SEND ERROR");
-                exit(-1);
-            }
-            // Clear the signal_message buffer after sending
-            memset(signal_message, 0, sizeof(signal_message));
-        }
-
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
+        /*--------------------------------------------------------------------------------*/
+        /*--------------------------------------------------------------------------------*/
+        /*--------------------------------------------------------------------------------*/
         // Collect terminal input
+
         if (fgets(terminal_input_string, sizeof(terminal_input_string), stdin) == NULL)
         {
-            printf("\n");   // Unsure if we want this or not, this is just to reset the line when closing
+            printf("\n"); // Unsure if we want this or not, this is just to reset the line when closing
             close(server_socket_fd);
             exit(0);
         }
 
-        strcpy(data, "CMD ");//this is the string contructor for the CMD value
+        strcpy(data, "CMD "); // this is the string contructor for the CMD value
         strcat(data, terminal_input_string);
         strcat(data, "\n");
 
@@ -154,27 +141,38 @@ maybe just to print
             perror("SEND ERROR");
             exit(-1);
         }
-
-
     }
     free(data);
 }
-
-
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
-
+/*--------------------------------------------------------------------------------*/
+/*--------------------------------------------------------------------------------*/
+/*--------------------------------------------------------------------------------*/
 // Signal handler for Ctrl+C
-void sigint_handler(int sig) {
-        snprintf(signal_message, MAX_DATA, "CTL c\n");
+void sigint_handler(int sig)
+{
+    snprintf(signal_message, MAX_DATA, "CTL c\n");
+    rc = send(server_socket_fd, signal_message, strlen(signal_message), 0);
+    if (rc < 0)
+    {
+        perror("SEND ERROR");
+        exit(-1);
+    }
+    // Clear the signal_message buffer after sending
+    memset(signal_message, 0, sizeof(signal_message));
 }
-
 // Signal handler for Ctrl+Z
-void sigtstp_handler(int sig) {
-        snprintf(signal_message, MAX_DATA, "CTL z\n");
+void sigtstp_handler(int sig)
+{
+    snprintf(signal_message, MAX_DATA, "CTL z\n");
+    rc = send(server_socket_fd, signal_message, strlen(signal_message), 0);
+    if (rc < 0)
+    {
+        perror("SEND ERROR");
+        exit(-1);
+    }
+    // Clear the signal_message buffer after sending
+    memset(signal_message, 0, sizeof(signal_message));
 }
-
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
-/*------------------------------------------------------------------------------------------------*/
+/*--------------------------------------------------------------------------------*/
+/*--------------------------------------------------------------------------------*/
+/*--------------------------------------------------------------------------------*/
