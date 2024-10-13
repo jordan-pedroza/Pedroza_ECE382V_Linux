@@ -152,7 +152,7 @@ void signal_handler(int signum)
     }
 }
 
-int yash_command(char *cmd_string, struct PCB *pcb_pointer)
+int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
 {
     int num_of_tokens;
 
@@ -503,80 +503,79 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer)
             close(pipefd[1]);
         }
 
-        // Setup our wait conditions
-        if (background_process)     // Background job
+        if (background_process)
         {
-            /*
-                In bash, if you do a "ls -l &" it might write out the "Done" before prompting again.
-                The only way to guarantee this behavior in yash is to sleep before the waitpid call
-                to give time for the child process to run.
-            */
             pcb_pointer = create_job(pcb_pointer, cmd_string, getpgid(cmd1_pid), RUNNING);
-            if (waitpid(-getpgid(cmd1_pid), &status, WNOHANG) == getpgid(cmd1_pid)) // This will likely never be valid
-            {
-                if (WIFEXITED(status))
-                {
-                    struct PCB *pcb_looper_last = NULL;
-                    struct PCB *pcb_looper = pcb_pointer;
-                    while (pcb_looper != NULL)
-                    {
-                        if (getpgid(cmd1_pid) == pcb_looper->pgid)
-                        {
-                            printf("[%d]%s  %-20s %s\n", pcb_looper->jobid, pcb_looper->most_recent_job ? "+" : "-", "Done", pcb_looper->name);
-                            if (pcb_looper_last == NULL)    // First element
-                            {
-                                pcb_pointer = pcb_pointer->next_pcb;
-                            }
-                            else
-                            {
-                                pcb_looper_last->next_pcb = pcb_looper->next_pcb;
-                            }
-                            set_new_latest_jobs(pcb_pointer);
-                        }
-                        pcb_looper_last = pcb_looper;
-                        pcb_looper = pcb_looper->next_pcb;
-                    }
-                }
-                else if (WIFSTOPPED(status))
-                {
-                    pcb_pointer = create_job(pcb_pointer, cmd_string, cmd1_pid, STOPPED);
-                }
-            }
-        }
-        else    // Interactive job
-        {
-            tcsetpgrp(STDIN_FILENO, cmd1_pid);
-            waitpid(-cmd1_pid, &status, WUNTRACED);
-            if (WIFSTOPPED(status))
-            {
-                pcb_pointer = create_job(pcb_pointer, cmd_string, cmd1_pid, STOPPED);
-                kill(tcgetpgrp(STDIN_FILENO), SIGTSTP);
-            }
-
-            if (pipe_present)
-            {
-                waitpid(-cmd1_pid, &status, WUNTRACED);
-            }
-            tcsetpgrp(STDIN_FILENO, getpgid(getpid()));
         }
 
-        // Memory cleanup
-        int mem_cleaner = 0;
-        if (cmd1_length > 0){
-            while (command1[mem_cleaner] != NULL)
-            {
-                free(command1[mem_cleaner]);
-                mem_cleaner++;
-            }
-        }
-        mem_cleaner = 0;
-        if (cmd2_length > 0)
-        {
-            while (command2[mem_cleaner] != NULL)
-            {
-                free(command2[mem_cleaner]);
-                mem_cleaner++;
-            }
-        }
+        *cmd_pgid = cmd1_pid;
+    }
+}
+
+// TODO: deal with background jobs and send back the prompt
+bool yash_wait(char* cmd_string, struct PCB *pcb_pointer, pid_t cmd1_pid)
+{
+    // Setup our wait conditions
+    // --------------- ORIGINAL YASH CODE BELOW ---------------
+    //if (background_process)     // Background job
+    //{
+    //    /*
+    //        In bash, if you do a "ls -l &" it might write out the "Done" before prompting again.
+    //        The only way to guarantee this behavior in yash is to sleep before the waitpid call
+    //        to give time for the child process to run.
+    //    */
+    //    pcb_pointer = create_job(pcb_pointer, cmd_string, getpgid(cmd1_pid), RUNNING);
+    //    if (waitpid(-getpgid(cmd1_pid), &status, WNOHANG) == getpgid(cmd1_pid)) // This will likely never be valid
+    //    {
+    //        if (WIFEXITED(status))
+    //        {
+    //            struct PCB *pcb_looper_last = NULL;
+    //            struct PCB *pcb_looper = pcb_pointer;
+    //            while (pcb_looper != NULL)
+    //            {
+    //                if (getpgid(cmd1_pid) == pcb_looper->pgid)
+    //                {
+    //                    printf("[%d]%s  %-20s %s\n", pcb_looper->jobid, pcb_looper->most_recent_job ? "+" : "-", "Done", pcb_looper->name);
+    //                    if (pcb_looper_last == NULL)    // First element
+    //                    {
+    //                        pcb_pointer = pcb_pointer->next_pcb;
+    //                    }
+    //                    else
+    //                    {
+    //                        pcb_looper_last->next_pcb = pcb_looper->next_pcb;
+    //                    }
+    //                    set_new_latest_jobs(pcb_pointer);
+    //                }
+    //                pcb_looper_last = pcb_looper;
+    //                pcb_looper = pcb_looper->next_pcb;
+    //            }
+    //        }
+    //        else if (WIFSTOPPED(status))
+    //        {
+    //            pcb_pointer = create_job(pcb_pointer, cmd_string, cmd1_pid, STOPPED);
+    //        }
+    //    }
+    //}
+    //else    // Interactive job
+    //{
+    //    //tcsetpgrp(STDIN_FILENO, cmd1_pid);
+    //    waitpid(-cmd1_pid, &status, WUNTRACED);
+    //    if (WIFSTOPPED(status))
+    //    {
+    //        pcb_pointer = create_job(pcb_pointer, cmd_string, cmd1_pid, STOPPED);
+    //        kill(tcgetpgrp(STDIN_FILENO), SIGTSTP);
+    //    }
+    //    if (pipe_present)
+    //    {
+    //        waitpid(-cmd1_pid, &status, WUNTRACED);
+    //    }
+    //    //tcsetpgrp(STDIN_FILENO, getpgid(getpid()));
+    //}
+    int status;
+    if (waitpid(-cmd1_pid, &status, WNOHANG) == getpgid(cmd1_pid))
+    {
+        // SOMETHING IS DONE
+        printf("PROCESS FINISHED!\n");
+        return true;
     }
 }

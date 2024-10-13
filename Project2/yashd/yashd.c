@@ -15,10 +15,17 @@
 #include "yash_common.h"
 #include "yash_commands.h"
 
-static int MAX_CLIENTS = 10;    // TODO: not sure what this should be?
-static int MAX_NAME_LENGTH = 100;
+#define MAX_CLIENTS 10
+
 static char LOG_FILE[] = "/tmp/yashd.log";
 static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool command_in_exec = false;
+
+typedef struct client_thread_args {
+    FILE *log_file;
+    int client_socket_fd;
+    struct sockaddr_in client_sockaddr;
+} client_thread_args;
 
 void writeToLog(char* data, char* ip_addr, uint16_t port, FILE *log)
 {
@@ -42,6 +49,7 @@ void reusePort(int s)
 	}
 }
 
+// TODO: verify init_daemon content is correct below
 void initialize_daemon()
 {
     // 1) Make child of init
@@ -93,33 +101,31 @@ void initialize_daemon()
     // TODO: Any more steps we need? Which order, from example or from class?
 }
 
-typedef struct client_thread_args {
-    FILE *log_file;
-    int client_socket_fd;
-    struct sockaddr_in client_sockaddr;
-} client_thread_args;
-
-//void clientThread(int client_socket_fd, struct sockaddr_in client_sockaddr)
 void *clientThread(void *args)
 {
     client_thread_args *arg_data = (client_thread_args *)args;
-    // TODO: grab all daemon init stuff
-    //char data[MAX_DATA];
+    char *output_buf = malloc(sizeof(char) * MAX_DATA);
     char *data = malloc(sizeof(char) * MAX_DATA);
     ssize_t rc;
     int num_of_tokens;
+    bool process_finished;
+    // Vars from fork+exec command(s)
+    char* cmd_string;
+    pid_t cmd_pgid;
 
     clear_string(data, MAX_DATA);
+    clear_string(output_buf, MAX_DATA);
     while(1)
     {
         // Send prompt (+ response) to client
-        strcat(data, "\n# ");
+        strcpy(data, "\n# ");
         rc = send(arg_data->client_socket_fd, data, strlen(data), 0);
         if (rc < 0)
         {
             perror("SEND ERROR");
         }
         clear_string(data, MAX_DATA);
+        printf("SENT PROMPT!\n");
 
         // Get command, signal, plain text from server
         rc = recv(arg_data->client_socket_fd, data, MAX_DATA, 0);
@@ -164,11 +170,23 @@ void *clientThread(void *args)
                 strcat(command_string, tokens[i]);
                 strcat(command_string, " ");
             }
+            process_finished = false;
+        }
+        else if ((num_of_tokens > 1) && (strcmp(tokens[0], "CTL") == 0))
+        {
+            // TODO: issue kill with relevant signal to current process
         }
 
-        printf("DEBUG - CMD STRING: %s \n", command_string);
-
-        yash_command(command_string, pcb_pointer);
+        int stdout_restore = dup(STDOUT_FILENO);            // DEBUG
+        dup2(arg_data->client_socket_fd, STDOUT_FILENO);    // Give control of STDOUT
+        yash_command(command_string, pcb_pointer, &cmd_pgid);
+        dup2(stdout_restore, STDOUT_FILENO);                // DEBUG - Restore control of STDOUT
+        // TODO: a case to keep in mind is the wc case (can we just pipe in stuff with a ^D and then wait?)
+        while(!yash_wait(command_string, pcb_pointer, cmd_pgid))
+        {
+            // Either try "plain text" mode here, or in other thread, and ensure the socket_fd is global
+        }
+        //printf("DONE!\n");
     }
 }
 
@@ -184,7 +202,7 @@ int main(int argc, char* argv[])
     pthread_t threads[MAX_CLIENTS];
     client_thread_args thread_args[MAX_CLIENTS];
 
-    //initialize_daemon();  // Just for ease of debug
+    initialize_daemon();  // Just for ease of debug
 
     addrinfo_hints.ai_family = AF_INET;
     addrinfo_hints.ai_socktype = SOCK_STREAM;
@@ -209,9 +227,9 @@ int main(int argc, char* argv[])
         exit(-1);    // localhost not found?
     }
 
-    char hostname[MAX_NAME_LENGTH];
-    char servername[MAX_NAME_LENGTH];
-    getnameinfo(addrinfo_result->ai_addr, addrinfo_result->ai_addrlen, hostname, MAX_NAME_LENGTH, servername, MAX_NAME_LENGTH, NI_NUMERICHOST);
+    char hostname[MAX_DATA];
+    char servername[MAX_DATA];
+    getnameinfo(addrinfo_result->ai_addr, addrinfo_result->ai_addrlen, hostname, MAX_DATA, servername, MAX_DATA, NI_NUMERICHOST);
     freeaddrinfo(addrinfo_result);
     printf("HOSTNAME: %s -- SERVERNAME: %s\n", hostname, servername);
 
@@ -256,8 +274,6 @@ int main(int argc, char* argv[])
         }
         printf("CLIENT CONNECTED: %s:%d\n", inet_ntoa(client.sin_addr), ntohs(client.sin_port));
 
-        // ==========================   MOVE TO A PTHREAD_CREATE FUNCTION
-        //clientThread(client_socket_fd, client);
         thread_args[next_thread].client_socket_fd = client_socket_fd;
         thread_args[next_thread].client_sockaddr = client;
         thread_args[next_thread].log_file = log_file;
@@ -267,8 +283,7 @@ int main(int argc, char* argv[])
             printf("ERROR WITH PTHREAD_CREATE!\n");
             exit(-1);
         }
-        next_thread++;
-        // ==========================
+        next_thread++;  // TODO: find a different way to deal with connection limit (10; not sure it'll be tested?)
 
     }
 

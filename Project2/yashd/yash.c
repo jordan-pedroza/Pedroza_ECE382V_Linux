@@ -8,16 +8,19 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <time.h>
-#include <readline/readline.h>
 #include <signal.h>
+#include <pthread.h>
+#include <stdbool.h>
 
 #include "yash_common.h"
 
 void sigtstp_handler(int sig);
 void sigint_handler(int sig);
-char signal_message[1024];
+void *comms_thread(void *arg);
+char signal_message[MAX_DATA];
 int server_socket_fd;
 int rc;
+bool prompt_flag;
 
 //////////////////////////////////////////
 //prototype for the communication thread//
@@ -29,10 +32,8 @@ int main(int argc, char *argv[])
     struct addrinfo *addrinfo_result;
     struct sockaddr_in server;
     struct sockaddr_in client;
-
-    // int server_socket_fd;
-    // int rc;
-
+    
+    pthread_t comm_thread;
     char terminal_input_string[MAX_DATA];
     char *data = malloc(sizeof(char) * MAX_DATA);
 
@@ -79,49 +80,21 @@ int main(int argc, char *argv[])
     }
     printf("-- Connected!\n");
 
+    if (pthread_create(&comm_thread, NULL, comms_thread, NULL) != 0) {
+        perror("Failed to create communication thread");
+        exit(-1);
+        }  
+
     while (1)
     {
         clear_string(data, MAX_DATA);
         memset(signal_message, 0, sizeof(signal_message));
 
-        /*--------------------------------------------------------------------------------*/
-        /*--------------------------------------------------------------------------------*/
-        /*--------------------------------------------------------------------------------*/
-
-        // Get prompt from server (+ response) from server
-        rc = recv(server_socket_fd, data, MAX_DATA, 0);
-        if (rc < 0)
-        {
-            perror("RECV ERROR");
-            exit(-1);
-        }
-        else if (rc == 0)
-        {
-            // EOF Return, shutdown connection
-            close(server_socket_fd);
-            exit(0);
-        }
-        printf("%s", data);
-
-        ///////////////////////////////////////
-        /*pthread create
-
-        so we will have a thread id
-        some other stuff in the struct
-        will there even be a critical section
-        maybe just to print
-        */
-        ///////////////////////////////////////
-
-        /*--------------------------------------------------------------------------------*/
-        /*--------------------------------------------------------------------------------*/
-        /*--------------------------------------------------------------------------------*/
-        signal(SIGINT, sigint_handler);   // Handle Ctrl+C
-        signal(SIGTSTP, sigtstp_handler); // Handle Ctrl+Z
-        /*--------------------------------------------------------------------------------*/
-        /*--------------------------------------------------------------------------------*/
-        /*--------------------------------------------------------------------------------*/
         // Collect terminal input
+        while (!prompt_flag)
+        {
+            //sleep(1);
+        }
 
         if (fgets(terminal_input_string, sizeof(terminal_input_string), stdin) == NULL)
         {
@@ -141,12 +114,12 @@ int main(int argc, char *argv[])
             perror("SEND ERROR");
             exit(-1);
         }
+        prompt_flag = false;
     }
+    pthread_join(comm_thread, NULL);
     free(data);
 }
-/*--------------------------------------------------------------------------------*/
-/*--------------------------------------------------------------------------------*/
-/*--------------------------------------------------------------------------------*/
+
 // Signal handler for Ctrl+C
 void sigint_handler(int sig)
 {
@@ -173,6 +146,54 @@ void sigtstp_handler(int sig)
     // Clear the signal_message buffer after sending
     memset(signal_message, 0, sizeof(signal_message));
 }
-/*--------------------------------------------------------------------------------*/
-/*--------------------------------------------------------------------------------*/
-/*--------------------------------------------------------------------------------*/
+
+void *comms_thread(void *arg)
+{
+    char buffer[MAX_DATA];
+    int rc;
+
+    while (1)
+    {
+        // Clear the buffer for each message
+        memset(buffer, 0, MAX_DATA);
+
+        // Wait for data from the server
+        rc = recv(server_socket_fd, buffer, MAX_DATA, 0);
+        if (rc < 0)
+        {
+            perror("RECV ERROR");
+            pthread_exit(NULL);
+        }
+        else if (rc == 0)
+        {
+            // Server has closed the connection
+            printf("Server closed the connection.\n");
+            close(server_socket_fd);
+            pthread_exit(NULL); // Exit the thread
+        }
+        buffer[rc] = 0;
+
+        // Print the message from the server to stdout
+        printf("%s", buffer);
+
+        int str_cmp_start = strlen(buffer) - 3;
+        char test[50];
+        strncpy(test, buffer + str_cmp_start, 4);
+        //printf("COMPARE VALUE: +%s+\n", test);
+        if (strcmp(test, "\n# ") == 0)
+        {
+            // Getting either one or two data packets out of recv (prompt + result of exec)
+            prompt_flag = true;
+        }
+
+        /*logic
+
+        we initalize in prompt mode
+        we move to output mode
+        how do we detect no output,
+        handle sleep ?
+        then we move to restart the process
+*/
+    }
+    return NULL;
+}
