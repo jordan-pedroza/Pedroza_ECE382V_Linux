@@ -78,7 +78,6 @@ int main(int argc, char *argv[])
         perror("CONNECT ERROR");
         exit(0);
     }
-    printf("-- Connected!\n");
 
     if (pthread_create(&comm_thread, NULL, comms_thread, NULL) != 0) {
         perror("Failed to create communication thread");
@@ -90,24 +89,61 @@ int main(int argc, char *argv[])
         clear_string(data, MAX_DATA);
         memset(signal_message, 0, sizeof(signal_message));
 
-        // Collect terminal input
-        while (!prompt_flag)
-        {
-            //sleep(1);
-        }
-
+        // ^C and ^Z get stuck here, while the server sends a new prompt
         if (fgets(terminal_input_string, sizeof(terminal_input_string), stdin) == NULL)
         {
-            printf("\n"); // Unsure if we want this or not, this is just to reset the line when closing
-            close(server_socket_fd);
-            exit(0);
+             if (feof(stdin)) {
+                clearerr(stdin);  // Clear EOF so we can continue reading from stdin
+            }
+            if (prompt_flag)
+            {
+                printf("\n");            // Reset terminal line after closing yash
+                strcpy(data, "CTL d\n"); // this is the string contructor for the CMD value
+                rc = send(server_socket_fd, data, strlen(data), 0);
+                if (rc < 0)
+                {
+                    perror("SEND ERROR");
+                    exit(-1);
+                }
+
+                close(server_socket_fd);
+                exit(0);
+            }
+            else
+            {
+                //printf("we are back in the ctl d statement");
+                
+                //printf("\n"); // Reset terminal line after closing yash
+                strcpy(data, "CTL d\n");    // this is the string contructor for the CMD value
+                rc = send(server_socket_fd, data, strlen(data), 0);
+                clear_string(data, MAX_DATA);
+                //sleep (1);
+                if (rc < 0)
+                {
+                    perror("SEND ERROR");
+                    exit(-1);
+                }
+                prompt_flag = true;
+            }
+        }
+        // -----------------------------------------------------------------
+        
+
+        // -------------------------------------------------------------------
+
+        if (prompt_flag)
+        {
+            strcpy(data, "CMD "); // this is the string contructor for the CMD value
+            strcat(data, terminal_input_string);
+            strcat(data, "\n");
+        }
+        else
+        {
+            strcat(data, terminal_input_string);
         }
 
-        strcpy(data, "CMD "); // this is the string contructor for the CMD value
-        strcat(data, terminal_input_string);
-        strcat(data, "\n");
-
         // Send command, signal, plain text to server
+        //printf("running the loop");
         rc = send(server_socket_fd, data, strlen(data), 0);
         if (rc < 0)
         {
@@ -158,6 +194,7 @@ void *comms_thread(void *arg)
         memset(buffer, 0, MAX_DATA);
 
         // Wait for data from the server
+        //printf("MSGMSGMSG");
         rc = recv(server_socket_fd, buffer, MAX_DATA, 0);
         if (rc < 0)
         {
@@ -167,7 +204,6 @@ void *comms_thread(void *arg)
         else if (rc == 0)
         {
             // Server has closed the connection
-            printf("Server closed the connection.\n");
             close(server_socket_fd);
             pthread_exit(NULL); // Exit the thread
         }
@@ -175,25 +211,17 @@ void *comms_thread(void *arg)
 
         // Print the message from the server to stdout
         printf("%s", buffer);
+        fflush(stdout);
 
+        // Check last 3 chars out of the buffer
         int str_cmp_start = strlen(buffer) - 3;
         char test[50];
         strncpy(test, buffer + str_cmp_start, 4);
-        //printf("COMPARE VALUE: +%s+\n", test);
         if (strcmp(test, "\n# ") == 0)
         {
             // Getting either one or two data packets out of recv (prompt + result of exec)
             prompt_flag = true;
         }
-
-        /*logic
-
-        we initalize in prompt mode
-        we move to output mode
-        how do we detect no output,
-        handle sleep ?
-        then we move to restart the process
-*/
     }
     return NULL;
 }

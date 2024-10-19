@@ -97,6 +97,11 @@ void print_jobs(struct PCB *pcb_pointer_head)
     struct PCB *pcb_looper = pcb_pointer_head;
     while (pcb_looper != NULL)
     {
+        if (pcb_looper->jobid == 0)
+        {
+            pcb_looper = pcb_looper->next_pcb;
+            continue;
+        }
         printf("[%d]%s  %-20s %s\n", pcb_looper->jobid, pcb_looper->most_recent_job ? "+" : "-", get_job_status(pcb_looper->process_state), pcb_looper->name);
         pcb_looper = pcb_looper->next_pcb;
     }
@@ -152,7 +157,7 @@ void signal_handler(int signum)
     }
 }
 
-int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
+bool yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid, bool *background_job, bool *job_cmd, int pipe_close)
 {
     int num_of_tokens;
 
@@ -186,6 +191,7 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
         // Process
         int status;
         bool background_process = false;
+        bool job_cmd_local = false;
 
 
         // Parse input tokens
@@ -255,7 +261,7 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
 
         if (command_error || cmd1_length == 0)
         {
-            return 0;   // Skip when no commands entered
+            return false;   // Skip when no commands entered
         }
 
         /*
@@ -310,7 +316,7 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
 
         if (command_error)
         {
-            return 0;
+            return false;
         }
 
         /*
@@ -320,12 +326,19 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
         struct PCB *pcb_looper = pcb_pointer;
         while (pcb_looper != NULL)
         {
+            if (pcb_looper->jobid == 0)
+            {
+                pcb_looper_last = pcb_looper;
+                pcb_looper = pcb_looper->next_pcb;
+                continue;
+            }
             int wait_ret = waitpid(-(pcb_looper->pgid), &status, WNOHANG);   // Just check this process
             if (wait_ret == pcb_looper->pgid)
             {
                 if (WIFEXITED(status))
                 {
                     printf("[%d]%s  %-20s %s\n", pcb_looper->jobid, pcb_looper->most_recent_job ? "+" : "-", "Done", pcb_looper->name);
+                    fflush(stdout);
                     if (pcb_looper_last == NULL)    // First element
                     {
                         pcb_pointer = pcb_pointer->next_pcb;
@@ -354,20 +367,22 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
         {
             if (pipe(pipefd) == -1)
             {
-                return 0;
+                return false;
             }
         }
 
         if (strcmp(command1[0], "jobs") == 0)
         {
-            print_jobs(pcb_pointer);
-            return 0;
+            *job_cmd = true;
+            print_jobs(pcb_pointer); fflush(stdout);
+            return false;
         }
-        else if (strcmp(command1[0], "fg") == 0)
+        else if (strcmp(command1[0], "fg") == 0)    // TODO: fix this up
         {
             // Send SIGCONT to most recent background/stopped process
             struct PCB *pcb_looper_last = NULL;
             struct PCB *pcb_looper = pcb_pointer;
+            *job_cmd = true;
             while (pcb_looper != NULL)
             {
                 if (pcb_looper->most_recent_job)
@@ -389,24 +404,27 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
             if (pcb_looper == NULL)
             {
                 printf("yash: fg: no such job\n");
-                return 0; // No most recent job found (bug?)
+                return false; // No most recent job found (bug?)
             }
 
             printf("%s\n", pcb_looper->name);  // Print job command
+            fflush(stdout);
             kill(-(pcb_looper->pgid), SIGCONT);
-            tcsetpgrp(STDIN_FILENO, pcb_looper->pgid);
+            //tcsetpgrp(STDIN_FILENO, pcb_looper->pgid);  // Need to remove this
             waitpid(-(pcb_looper->pgid), &status, WUNTRACED);
             if (WIFSTOPPED(status))
             {
                 pcb_pointer = create_job(pcb_pointer, pcb_looper->name, pcb_looper->pgid, STOPPED);
             }
-            tcsetpgrp(STDIN_FILENO, getpgid(getpid()));
-            return 0;
+            //tcsetpgrp(STDIN_FILENO, getpgid(getpid()));
+            //*cmd_pgid = pcb_looper->pgid;
+            return false;
         }
         else if (strcmp(command1[0], "bg") == 0)
         {
             struct PCB *pcb_looper = pcb_pointer;
             int pgid_latest_stopped = -1;
+            *job_cmd = true;
             while (pcb_looper != NULL)
             {
                 if (pcb_looper->process_state == STOPPED)
@@ -420,7 +438,7 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
             if (pgid_latest_stopped == -1)  // No jobs to background
             {
                 printf("yash: bg: no such job\n");
-                return 0;
+                return false;
             }
 
             pcb_looper = pcb_pointer;
@@ -430,13 +448,14 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
                 {
                     pcb_looper->process_state = RUNNING;
                     printf("[%d]%s %s &\n", pcb_looper->jobid, pcb_looper->most_recent_job ? "+" : "-", pcb_looper->name);
+                    fflush(stdout);
                     break;
                 }
                 pcb_looper = pcb_looper->next_pcb;
             }
 
             kill(-pgid_latest_stopped, SIGCONT);
-            return 0;
+            return false;
         }
 
         // Placeholder process IDs and such
@@ -460,7 +479,7 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
             {
                 dup2(cmd1_redirect_stdin_fd, STDIN_FILENO);     // Handle errors?
             }
-
+            close(pipe_close);
             if (execvpe(command1[0], command1, environ))
             {
                 exit(0);    // Bad command
@@ -488,7 +507,7 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
                     close(pipefd[1]);
                 }
                 
-
+                close(pipe_close);
                 if (execvpe(command2[0], command2, environ))
                 {
                     exit(0);    // Bad command
@@ -509,73 +528,47 @@ int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid)
         }
 
         *cmd_pgid = cmd1_pid;
+        *background_job = background_process;
     }
 }
 
-// TODO: deal with background jobs and send back the prompt
-bool yash_wait(char* cmd_string, struct PCB *pcb_pointer, pid_t cmd1_pid)
+bool yash_wait(char* cmd_string, struct PCB *pcb_pointer, pid_t cmd1_pid, bool background)
 {
-    // Setup our wait conditions
-    // --------------- ORIGINAL YASH CODE BELOW ---------------
-    //if (background_process)     // Background job
-    //{
-    //    /*
-    //        In bash, if you do a "ls -l &" it might write out the "Done" before prompting again.
-    //        The only way to guarantee this behavior in yash is to sleep before the waitpid call
-    //        to give time for the child process to run.
-    //    */
-    //    pcb_pointer = create_job(pcb_pointer, cmd_string, getpgid(cmd1_pid), RUNNING);
-    //    if (waitpid(-getpgid(cmd1_pid), &status, WNOHANG) == getpgid(cmd1_pid)) // This will likely never be valid
-    //    {
-    //        if (WIFEXITED(status))
-    //        {
-    //            struct PCB *pcb_looper_last = NULL;
-    //            struct PCB *pcb_looper = pcb_pointer;
-    //            while (pcb_looper != NULL)
-    //            {
-    //                if (getpgid(cmd1_pid) == pcb_looper->pgid)
-    //                {
-    //                    printf("[%d]%s  %-20s %s\n", pcb_looper->jobid, pcb_looper->most_recent_job ? "+" : "-", "Done", pcb_looper->name);
-    //                    if (pcb_looper_last == NULL)    // First element
-    //                    {
-    //                        pcb_pointer = pcb_pointer->next_pcb;
-    //                    }
-    //                    else
-    //                    {
-    //                        pcb_looper_last->next_pcb = pcb_looper->next_pcb;
-    //                    }
-    //                    set_new_latest_jobs(pcb_pointer);
-    //                }
-    //                pcb_looper_last = pcb_looper;
-    //                pcb_looper = pcb_looper->next_pcb;
-    //            }
-    //        }
-    //        else if (WIFSTOPPED(status))
-    //        {
-    //            pcb_pointer = create_job(pcb_pointer, cmd_string, cmd1_pid, STOPPED);
-    //        }
-    //    }
-    //}
-    //else    // Interactive job
-    //{
-    //    //tcsetpgrp(STDIN_FILENO, cmd1_pid);
-    //    waitpid(-cmd1_pid, &status, WUNTRACED);
-    //    if (WIFSTOPPED(status))
-    //    {
-    //        pcb_pointer = create_job(pcb_pointer, cmd_string, cmd1_pid, STOPPED);
-    //        kill(tcgetpgrp(STDIN_FILENO), SIGTSTP);
-    //    }
-    //    if (pipe_present)
-    //    {
-    //        waitpid(-cmd1_pid, &status, WUNTRACED);
-    //    }
-    //    //tcsetpgrp(STDIN_FILENO, getpgid(getpid()));
-    //}
     int status;
+    //printf("CMD PID: %d\n", cmd1_pid);
     if (waitpid(-cmd1_pid, &status, WNOHANG) == getpgid(cmd1_pid))
     {
-        // SOMETHING IS DONE
-        printf("PROCESS FINISHED!\n");
         return true;
     }
+    else
+    {
+        return false;
+    }
+}
+
+bool send_signal_to_job(pid_t cmd_pgid, char *signal_str)
+{
+    int num_of_tokens = 0;
+    // Sanitize the CTL signal string (remove \n)
+    size_t replace_newline_char = strcspn(signal_str, "\n");
+    if (replace_newline_char != strlen(signal_str))
+    {
+        signal_str[replace_newline_char] = 0;
+    }
+    char** input_tokens = tokenize_input(signal_str, &num_of_tokens);
+
+    if ((num_of_tokens >= 2) && (strcmp(input_tokens[0], "CTL") == 0))
+    {
+        if (strcmp(input_tokens[1], "c") == 0)
+        {
+            kill(cmd_pgid, SIGINT);
+            return false;
+        }
+        else if (strcmp(input_tokens[1], "z") == 0)
+        {
+            kill(cmd_pgid, SIGTSTP);
+            return true;
+        }
+    }
+    return false;
 }

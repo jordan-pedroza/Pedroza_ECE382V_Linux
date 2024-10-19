@@ -11,6 +11,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include "yash_common.h"
 #include "yash_commands.h"
@@ -33,7 +34,7 @@ void writeToLog(char* data, char* ip_addr, uint16_t port, FILE *log)
     char date_entry[MAX_DATA];
     time_t cur_time = time(NULL);
     strftime(date_entry, sizeof(date_entry), "%b %d %X", localtime(&cur_time));
-    pthread_mutex_lock(&log_lock);  // TODO: Might need to beef up this for race conditions?
+    pthread_mutex_lock(&log_lock);
     fprintf(log, "%s yashd[%s:%d]: %s\n", date_entry, ip_addr, port, data);
     fflush(log);
     pthread_mutex_unlock(&log_lock);
@@ -109,23 +110,31 @@ void *clientThread(void *args)
     ssize_t rc;
     int num_of_tokens;
     bool process_finished;
+    bool yash_command_status;
     // Vars from fork+exec command(s)
     char* cmd_string;
     pid_t cmd_pgid;
+    struct PCB *pcb_pointer = malloc(sizeof(struct PCB));   // Create a HEAD job for the job list
+    pcb_pointer->jobid = 0;
+    bool background_job;
+    bool job_cmd;
 
     clear_string(data, MAX_DATA);
     clear_string(output_buf, MAX_DATA);
+    dup2(arg_data->client_socket_fd, STDOUT_FILENO);    // Send STDOUT to socket
     while(1)
     {
-        // Send prompt (+ response) to client
+        clear_string(data, MAX_DATA);
+        // Send prompt (+ response) to client    
         strcpy(data, "\n# ");
+        
         rc = send(arg_data->client_socket_fd, data, strlen(data), 0);
+        
         if (rc < 0)
         {
             perror("SEND ERROR");
         }
         clear_string(data, MAX_DATA);
-        printf("SENT PROMPT!\n");
 
         // Get command, signal, plain text from server
         rc = recv(arg_data->client_socket_fd, data, MAX_DATA, 0);
@@ -137,7 +146,6 @@ void *clientThread(void *args)
         else if (rc == 0)
         {
             // EOF Return, shutdown connection
-            printf("DISCONNECT!\n");
             close(arg_data->client_socket_fd);
             pthread_exit(NULL);
         }
@@ -155,10 +163,10 @@ void *clientThread(void *args)
         {
             // Means this was an invalid command? TODO: figure out exception for raw input
             printf("Invalid Command String!\n");
+            continue;
         }
         writeToLog(data, inet_ntoa(arg_data->client_sockaddr.sin_addr), ntohs(arg_data->client_sockaddr.sin_port), arg_data->log_file);
 
-        struct PCB *pcb_pointer = NULL;
         char **tokens = tokenize_input(data, &num_of_tokens);
         char *command_string = malloc(sizeof(char) * MAX_DATA);
         command_string[0] = 0;
@@ -175,18 +183,69 @@ void *clientThread(void *args)
         else if ((num_of_tokens > 1) && (strcmp(tokens[0], "CTL") == 0))
         {
             // TODO: issue kill with relevant signal to current process
+            continue;
         }
+        background_job = false;
+        job_cmd = false;
 
-        int stdout_restore = dup(STDOUT_FILENO);            // DEBUG
-        dup2(arg_data->client_socket_fd, STDOUT_FILENO);    // Give control of STDOUT
-        yash_command(command_string, pcb_pointer, &cmd_pgid);
-        dup2(stdout_restore, STDOUT_FILENO);                // DEBUG - Restore control of STDOUT
+        //dup2(arg_data->client_socket_fd, STDIN_FILENO);    // Send STDOUT to socket
+        //dup2(arg_data->client_socket_fd, STDOUT_FILENO);    // Send STDOUT to socket
+        int pfd[2];
+        pipe(pfd);
+        dup2(pfd[0], STDIN_FILENO);
+        yash_command_status = yash_command(command_string, pcb_pointer, &cmd_pgid, &background_job, &job_cmd, pfd[1]);
         // TODO: a case to keep in mind is the wc case (can we just pipe in stuff with a ^D and then wait?)
-        while(!yash_wait(command_string, pcb_pointer, cmd_pgid))
+        while(1)
         {
+            //printf("LOOP\n"); fflush(stdout);sleep(1);
+            if (!background_job && !job_cmd){
+                if (yash_wait(command_string, pcb_pointer, cmd_pgid, background_job))
+                {
+                    break;
+                }
+            }
+            else
+            {
+                break;
+            }
+
             // Either try "plain text" mode here, or in other thread, and ensure the socket_fd is global
+            clear_string(data, MAX_DATA);
+            rc = recv(arg_data->client_socket_fd, data, MAX_DATA, MSG_DONTWAIT);
+            if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            {
+                // This means nothing is in the buffer
+                continue;
+            }
+            else if (rc < 0)
+            {
+                perror("RECV ERROR");
+                pthread_exit(NULL);
+            }
+            else if (rc == 0)
+            {
+                /*printf("TESTING\n");*/ fflush(stdout);
+                // EOF Return, shutdown connection
+                close(arg_data->client_socket_fd);
+                pthread_exit(NULL);
+            }
+            /*printf("DATA: +%s+\n", data);*/ fflush(stdout);
+            //write(pfd[1], data, strlen(data));
+            if (strcmp("CTL d\n", data) == 0)
+            {
+                clear_string(data, MAX_DATA);
+                /*printf("TESTING\n");*/ fflush(stdout);
+                close(pfd[1]); close(pfd[0]);
+                
+            }else{write(pfd[1], data, strlen(data));}
+
+            if (send_signal_to_job(cmd_pgid, data))
+            {
+                // Means we stopped a process with ^Z
+                pcb_pointer = create_job(pcb_pointer, command_string, cmd_pgid, STOPPED);
+                break;
+            }
         }
-        //printf("DONE!\n");
     }
 }
 
@@ -202,6 +261,7 @@ int main(int argc, char* argv[])
     pthread_t threads[MAX_CLIENTS];
     client_thread_args thread_args[MAX_CLIENTS];
 
+    // TODO: jobs output not happening when daemon initialized??
     initialize_daemon();  // Just for ease of debug
 
     addrinfo_hints.ai_family = AF_INET;
@@ -231,7 +291,7 @@ int main(int argc, char* argv[])
     char servername[MAX_DATA];
     getnameinfo(addrinfo_result->ai_addr, addrinfo_result->ai_addrlen, hostname, MAX_DATA, servername, MAX_DATA, NI_NUMERICHOST);
     freeaddrinfo(addrinfo_result);
-    printf("HOSTNAME: %s -- SERVERNAME: %s\n", hostname, servername);
+    //printf("HOSTNAME: %s -- SERVERNAME: %s\n", hostname, servername);
 
     // --- Server Socket Step ---
     server_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -272,7 +332,6 @@ int main(int argc, char* argv[])
             perror("ACCEPT ERROR");
             //exit(-1);
         }
-        printf("CLIENT CONNECTED: %s:%d\n", inet_ntoa(client.sin_addr), ntohs(client.sin_port));
 
         thread_args[next_thread].client_socket_fd = client_socket_fd;
         thread_args[next_thread].client_sockaddr = client;
@@ -286,6 +345,4 @@ int main(int argc, char* argv[])
         next_thread++;  // TODO: find a different way to deal with connection limit (10; not sure it'll be tested?)
 
     }
-
-    printf("PAST BIND!\n");
 }

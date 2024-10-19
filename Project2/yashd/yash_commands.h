@@ -67,6 +67,16 @@ char** tokenize_input(char *in_string, int *token_count);
 
 void signal_handler(int signum);
 
-int yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid);
+/*
+    Runs the code associated with parsing the command string
+    and issues the fork + exec as needed.
 
-bool yash_wait(char* cmd_string, struct PCB *pcb_pointer, pid_t cmd1_pid);
+    If the command requires a wait (foreground process), true is returned.
+    If the command is run in the background or is something like
+    bg, fg, jobs, or is invalid, return false.
+*/
+bool yash_command(char *cmd_string, struct PCB *pcb_pointer, pid_t *cmd_pgid, bool *background_job, bool *job_cmd, int pipe_close);
+
+bool yash_wait(char* cmd_string, struct PCB *pcb_pointer, pid_t cmd1_pid, bool background);
+
+bool send_signal_to_job(pid_t cmd_pgid, char *signal_str);
